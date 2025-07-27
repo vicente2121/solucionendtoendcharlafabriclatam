@@ -1,0 +1,82 @@
+# ╔════════════════════════════════════════════════════════════╗
+# ║  BRONZE ➜ SILVER (FULL LOAD) – CoinGecko  USD & EUR       ║
+# ╚════════════════════════════════════════════════════════════╝
+
+from pyspark.sql import functions as F
+from delta.tables import DeltaTable
+
+# 1. Leer TODOS los JSON de Bronze
+bronze_root = "Files/bronze/cryptos/*/*.json"
+
+df_raw = (
+    spark.read
+         .option("multiLine", False)
+         .json(bronze_root)
+         .withColumn(
+             "moneda_vs",
+             F.regexp_extract(F.input_file_name(),
+                              r'/([a-z]{3})_snapshot\.json$', 1))
+         .withColumn(
+             "fecha_snapshot",
+             F.to_date(F.regexp_extract(
+                 F.input_file_name(),
+                 r'/cryptos/(\d{4}-\d{2}-\d{2})/', 1)))
+         .withColumn("ts_ingestion", F.current_timestamp())
+)
+
+# 2. Selección + tipado
+df_silver = (
+    df_raw.select(
+        "fecha_snapshot",
+        "moneda_vs",
+        F.col("id").alias("id_moneda"),
+        F.col("symbol").alias("sigla"),
+        F.col("name").alias("nombre_moneda"),
+        F.col("current_price").cast("double").alias("precio_actual"),
+        F.col("market_cap").cast("double").alias("capitalizacion"),
+        F.col("total_volume").cast("double").alias("volumen_total"),
+        F.coalesce("price_change_percentage_24h_in_currency",
+                   "price_change_percentage_24h")
+          .cast("double").alias("variacion_pct_24h"),
+        F.col("market_cap_rank").cast("int").alias("puesto_market_cap"),
+        F.col("high_24h").cast("double").alias("maximo_24h"),
+        F.col("low_24h").cast("double").alias("minimo_24h"),
+        F.col("ath").cast("double").alias("max_historico"),
+        F.col("ath_change_percentage").cast("double")
+          .alias("variacion_pct_ath"),
+        F.to_timestamp("ath_date").alias("fecha_ath"),
+        F.to_timestamp("last_updated").alias("ultima_actualizacion"),
+        "ts_ingestion"
+    )
+)
+
+# 3. Validaciones mínimas
+n_reg = df_silver.count()
+assert n_reg >= 400, f"⚠️ Se esperaban ≈500 registros, llegaron {n_reg}"
+
+for col_oblig in ["id_moneda", "precio_actual", "capitalizacion"]:
+    assert df_silver.filter(F.col(col_oblig).isNull()).count() == 0, \
+        f"⚠️ NULLs en «{col_oblig}»"
+
+# 4. Sobrescribir Silver (FULL LOAD)
+silver_path = "abfss://EventoMicrosoftFabricrRenzo@onelake.dfs.fabric.microsoft.com/LK_Plata.Lakehouse/Tables/silver_crypto_market" 
+
+if DeltaTable.isDeltaTable(spark, silver_path):
+    spark.sql("DROP TABLE silver_crypto_market")   # borra metadatos
+
+(df_silver.write
+          .format("delta")
+          .mode("overwrite")            # recrea los archivos
+          .option("overwriteSchema", "true")
+          .partitionBy("fecha_snapshot")
+          .save(silver_path))
+
+print(f"🟢 Silver recreada con {n_reg} registros.")
+
+# # 5. OPTIMIZE + ZORDER  (sin la columna de partición)
+# spark.sql("""
+#     OPTIMIZE delta.`Tables/silver_crypto_market`
+#     ZORDER BY (id_moneda, moneda_vs)
+# """)
+
+
