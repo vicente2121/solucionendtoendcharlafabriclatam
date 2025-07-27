@@ -1,0 +1,16 @@
+from pyspark.sql.functions import col
+
+# Leer tabla desde el Lakehouse
+df_destinatarios = spark.read.format("delta").load("Tables/Parametros.destinatarios")
+
+# Recoger todos los correos sin importar el cargo
+correos = [row["correo"] for row in df_destinatarios.collect()]
+
+# Eliminar duplicados (opcional)
+correos_unicos = sorted(set(correos))
+
+# Unirlos en una cadena separada por coma
+todos_los_correos = ",".join(correos_unicos)
+
+# Devolver solo el string como salida
+mssparkutils.notebook.exit(todos_los_correos)
